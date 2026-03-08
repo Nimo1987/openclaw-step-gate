@@ -3,14 +3,13 @@ import * as path from "node:path";
 import * as os from "node:os";
 
 /**
- * Step Gate v8 — OpenClaw Plugin
+ * Step Gate v9 — OpenClaw Plugin
  *
- * Enforces sequential task execution discipline for AI agents.
- *
- * Changes in v8:
- *   - Fixed: removed duplicate globalThis hook registration (was firing 2x)
- *   - Fixed: scans workspace root for todo*.md (not workspace/todos/)
- *   - Cleaner bootstrap handler
+ * Changes in v9:
+ *   - Fixed: skip todos with "Status: Completed" from STEP-GATE.md injection
+ *   - Fixed: analyze() now reads file-level Status header
+ *   - Checkbox sync still runs on completed files (to fix leftover unchecked boxes)
+ *   - But completed files are excluded from bootstrap injection
  */
 
 // ── Debug Logger ──────────────────────────────────────────────────────────
@@ -39,6 +38,7 @@ interface Todo {
   done: number;
   current: number | null;
   skipped: number[];
+  fileCompleted: boolean; // true if file header says "Status: Completed"
 }
 
 // ── Parser ────────────────────────────────────────────────────────────────
@@ -94,15 +94,29 @@ function parseSteps(content: string): Step[] {
   return steps;
 }
 
+// ── Check if file-level Status is Completed ───────────────────────────────
+
+function isFileCompleted(content: string): boolean {
+  // Match "# Status: Completed" or "Status: Completed" in the header area (first 10 lines)
+  const header = content.split("\n").slice(0, 10).join("\n").toLowerCase();
+  return (
+    header.includes("status: completed") ||
+    header.includes("status: done") ||
+    header.includes("status: 已完成")
+  );
+}
+
 // ── Analyze a single todo file ────────────────────────────────────────────
 
 function analyze(fp: string): Todo | null {
   try {
-    const steps = parseSteps(fs.readFileSync(fp, "utf-8"));
+    const content = fs.readFileSync(fp, "utf-8");
+    const steps = parseSteps(content);
     if (!steps.length) return null;
 
     const done = steps.filter((s) => s.status === "done").length;
     const sorted = [...steps].sort((a, b) => a.number - b.number);
+    const fileCompleted = isFileCompleted(content);
 
     let current: number | null = null;
     for (const s of sorted) {
@@ -132,6 +146,7 @@ function analyze(fp: string): Todo | null {
       done,
       current,
       skipped,
+      fileCompleted,
     };
   } catch {
     return null;
@@ -140,10 +155,7 @@ function analyze(fp: string): Todo | null {
 
 // ── Find all recent todo files (last 24h) ─────────────────────────────────
 
-function findTodos(dir: string): Todo[] {
-  const results: Todo[] = [];
-
-  // Scan workspace root for todo*.md
+function scanDir(dir: string, results: Todo[]): void {
   try {
     for (const f of fs.readdirSync(dir)) {
       if (!f.startsWith("todo") || !f.endsWith(".md")) continue;
@@ -153,26 +165,17 @@ function findTodos(dir: string): Todo[] {
       } catch {
         continue;
       }
+      if (results.find((r) => r.path === fp)) continue;
       const t = analyze(fp);
       if (t) results.push(t);
     }
   } catch {}
+}
 
-  // Also scan workspace/todos/ subdirectory if it exists
-  const todosSubdir = path.join(dir, "todos");
-  try {
-    for (const f of fs.readdirSync(todosSubdir)) {
-      if (!f.startsWith("todo") || !f.endsWith(".md")) continue;
-      const fp = path.join(todosSubdir, f);
-      try {
-        if (Date.now() - fs.statSync(fp).mtimeMs > 86400000) continue;
-      } catch {
-        continue;
-      }
-      const t = analyze(fp);
-      if (t && !results.find((r) => r.path === fp)) results.push(t);
-    }
-  } catch {}
+function findTodos(dir: string): Todo[] {
+  const results: Todo[] = [];
+  scanDir(dir, results);
+  scanDir(path.join(dir, "todos"), results);
 
   return results.sort((a, b) => {
     try {
@@ -232,9 +235,12 @@ function syncCheckboxes(fp: string, steps: Step[]): boolean {
 }
 
 // ── Generate STEP-GATE.md ─────────────────────────────────────────────────
+// Only includes ACTIVE (non-completed) todos with enough steps
 
 function generateBootstrap(todos: Todo[], minSteps: number): string | null {
-  const active = todos.filter((t) => t.total >= minSteps && t.done < t.total);
+  const active = todos.filter(
+    (t) => !t.fileCompleted && t.total >= minSteps && t.done < t.total,
+  );
   if (!active.length) return null;
 
   const lines: string[] = [
@@ -273,12 +279,20 @@ function generateBootstrap(todos: Todo[], minSteps: number): string | null {
 
 function syncAll(dir: string): void {
   const todos = findTodos(dir);
+
+  // Sync checkboxes on ALL todos (including completed ones, to fix leftovers)
   for (const t of todos) syncCheckboxes(t.path, t.steps);
 
+  // Generate STEP-GATE.md only for active todos
   const content = generateBootstrap(todos, 3);
   if (content) {
     try {
       fs.writeFileSync(path.join(dir, "STEP-GATE.md"), content, "utf-8");
+    } catch {}
+  } else {
+    // No active todos — remove STEP-GATE.md so it doesn't pollute context
+    try {
+      fs.unlinkSync(path.join(dir, "STEP-GATE.md"));
     } catch {}
   }
 }
@@ -291,7 +305,7 @@ export default function register(api: any) {
   const minSteps = cfg.minSteps ?? 3;
   const syncInterval = cfg.syncInterval ?? 15000;
 
-  D(`=== step-gate v8 register() ===`);
+  D(`=== step-gate v9 register() ===`);
   if (!enabled) return;
 
   const wsDir = (): string =>
@@ -305,13 +319,16 @@ export default function register(api: any) {
     const ctx = event?.context ?? {};
     const wd = ctx.workspaceDir || wsDir();
     const todos = findTodos(wd);
-    D(`bootstrap: ${todos.length} todos`);
+    D(`bootstrap: ${todos.length} todos (${todos.filter((t: Todo) => t.fileCompleted).length} completed)`);
     if (!todos.length) return;
 
     for (const t of todos) syncCheckboxes(t.path, t.steps);
 
     const content = generateBootstrap(todos, minSteps);
-    if (!content) return;
+    if (!content) {
+      D("no active todos, skip injection");
+      return;
+    }
 
     const fp = path.join(wd, "STEP-GATE.md");
     try {
@@ -335,7 +352,6 @@ export default function register(api: any) {
     }
   };
 
-  // Register via plugin API only (no globalThis duplicate)
   api.registerHook("agent:bootstrap", bootstrapHandler, {
     name: "step-gate-bootstrap",
   });
@@ -350,6 +366,6 @@ export default function register(api: any) {
     }
   }, syncInterval);
 
-  D("v8 loaded (single-hook + dual-path scan)");
-  api.logger?.info?.("step-gate v8 loaded");
+  D("v9 loaded (completed-filter + dual-path scan)");
+  api.logger?.info?.("step-gate v9 loaded");
 }

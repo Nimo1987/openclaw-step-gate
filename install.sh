@@ -516,34 +516,6 @@ else
     warn "Gateway not running. Please start it manually."
 fi
 
-# ══════════════════════════════════════════════════════════════
-# Part 4: AGENTS.md (workspace behavior guide)
-# ══════════════════════════════════════════════════════════════
-
-AGENTS_SRC="$(cd "$(dirname "$0")" && pwd)/AGENTS.md"
-AGENTS_DST="$OC_WORKSPACE/AGENTS.md"
-
-if [ -f "$AGENTS_SRC" ]; then
-    if [ -f "$AGENTS_DST" ]; then
-        cp "$AGENTS_DST" "${AGENTS_DST}.bak.$(date +%Y%m%d%H%M%S)"
-        warn "Existing AGENTS.md backed up"
-    fi
-    cp "$AGENTS_SRC" "$AGENTS_DST"
-    info "AGENTS.md deployed to $AGENTS_DST"
-else
-    # Downloading from GitHub if running via curl pipe
-    AGENTS_URL="https://raw.githubusercontent.com/Nimo1987/openclaw-step-gate/main/AGENTS.md"
-    if curl -fsSL "$AGENTS_URL" -o "$AGENTS_DST.tmp" 2>/dev/null; then
-        if [ -f "$AGENTS_DST" ]; then
-            cp "$AGENTS_DST" "${AGENTS_DST}.bak.$(date +%Y%m%d%H%M%S)"
-            warn "Existing AGENTS.md backed up"
-        fi
-        mv "$AGENTS_DST.tmp" "$AGENTS_DST"
-        info "AGENTS.md downloaded and deployed to $AGENTS_DST"
-    else
-        warn "Could not download AGENTS.md. You can manually copy it to $AGENTS_DST"
-    fi
-fi
 
 # ══════════════════════════════════════════════════════════════
 # Done
@@ -556,7 +528,6 @@ echo ""
 echo "  Components:"
 echo "    - Internal Hook → $HOOK_DIR (agent:bootstrap injection)"
 echo "    - Plugin        → $PLUGIN_DIR (periodic checkbox sync)"
-echo "    - AGENTS.md     → $OC_WORKSPACE/AGENTS.md (workspace behavior guide)"
 echo ""
 echo "  Verify:"
 echo "    tail -f /tmp/step-gate.log"

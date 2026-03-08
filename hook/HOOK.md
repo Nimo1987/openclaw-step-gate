@@ -2,10 +2,14 @@
 name: step-gate
 description: "Inject STEP-GATE.md into agent bootstrap context to enforce step execution discipline"
 metadata:
-  clawdbot:
-    emoji: "🚦"
-    events: ["agent:bootstrap"]
-    always: true
+  {
+    "openclaw":
+      {
+        "emoji": "🚦",
+        "events": ["agent:bootstrap"],
+        "always": true,
+      },
+  }
 ---
 # Step Gate — Bootstrap Hook
 

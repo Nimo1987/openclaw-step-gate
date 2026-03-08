@@ -1,0 +1,23 @@
+{
+  "id": "step-gate",
+  "name": "Step Gate",
+  "description": "Enforces todo-based step execution discipline. Auto-syncs checkboxes from Execution Log and injects task progress into agent context.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": {
+        "type": "boolean",
+        "description": "Enable or disable step gate enforcement (default: true)"
+      },
+      "minSteps": {
+        "type": "number",
+        "description": "Minimum number of steps in a todo to trigger enforcement (default: 3)"
+      },
+      "syncInterval": {
+        "type": "number",
+        "description": "Checkbox sync interval in milliseconds (default: 15000)"
+      }
+    }
+  }
+}

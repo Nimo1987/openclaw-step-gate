@@ -3,13 +3,13 @@ import * as path from "node:path";
 import * as os from "node:os";
 
 /**
- * Step Gate v9 — OpenClaw Plugin
+ * Step Gate v10 — OpenClaw Plugin
  *
- * Changes in v9:
- *   - Fixed: skip todos with "Status: Completed" from STEP-GATE.md injection
- *   - Fixed: analyze() now reads file-level Status header
- *   - Checkbox sync still runs on completed files (to fix leftover unchecked boxes)
- *   - But completed files are excluded from bootstrap injection
+ * Changes in v10:
+ *   - Fixed: restore globalThis delayed injection (5s after register)
+ *     to ensure hook handler survives hooks:loader reinitialization
+ *   - api.registerHook kept as primary, globalThis as fallback
+ *   - Dedup: bootstrap handler checks a flag to avoid double-fire
  */
 
 // ── Debug Logger ──────────────────────────────────────────────────────────
@@ -38,7 +38,7 @@ interface Todo {
   done: number;
   current: number | null;
   skipped: number[];
-  fileCompleted: boolean; // true if file header says "Status: Completed"
+  fileCompleted: boolean;
 }
 
 // ── Parser ────────────────────────────────────────────────────────────────
@@ -97,7 +97,6 @@ function parseSteps(content: string): Step[] {
 // ── Check if file-level Status is Completed ───────────────────────────────
 
 function isFileCompleted(content: string): boolean {
-  // Match "# Status: Completed" or "Status: Completed" in the header area (first 10 lines)
   const header = content.split("\n").slice(0, 10).join("\n").toLowerCase();
   return (
     header.includes("status: completed") ||
@@ -235,7 +234,6 @@ function syncCheckboxes(fp: string, steps: Step[]): boolean {
 }
 
 // ── Generate STEP-GATE.md ─────────────────────────────────────────────────
-// Only includes ACTIVE (non-completed) todos with enough steps
 
 function generateBootstrap(todos: Todo[], minSteps: number): string | null {
   const active = todos.filter(
@@ -280,21 +278,70 @@ function generateBootstrap(todos: Todo[], minSteps: number): string | null {
 function syncAll(dir: string): void {
   const todos = findTodos(dir);
 
-  // Sync checkboxes on ALL todos (including completed ones, to fix leftovers)
   for (const t of todos) syncCheckboxes(t.path, t.steps);
 
-  // Generate STEP-GATE.md only for active todos
   const content = generateBootstrap(todos, 3);
   if (content) {
     try {
       fs.writeFileSync(path.join(dir, "STEP-GATE.md"), content, "utf-8");
     } catch {}
   } else {
-    // No active todos — remove STEP-GATE.md so it doesn't pollute context
     try {
       fs.unlinkSync(path.join(dir, "STEP-GATE.md"));
     } catch {}
   }
+}
+
+// ── globalThis hook injection ─────────────────────────────────────────────
+// OpenClaw's hooks:loader may reinitialize the handler map AFTER plugin
+// register() runs. We inject directly into globalThis with a delay to
+// ensure our handler survives.
+
+function injectGlobalHook(handler: Function): void {
+  const G = globalThis as any;
+  const KEY = "__openclaw_internal_hook_handlers__";
+
+  const inject = () => {
+    let map = G[KEY];
+    if (!map || typeof map.get !== "function") {
+      // Map doesn't exist yet, create it
+      map = new Map();
+      G[KEY] = map;
+    }
+
+    const event = "agent:bootstrap";
+    const existing = map.get(event) || [];
+
+    // Check if we already injected (avoid duplicates)
+    const alreadyInjected = existing.some(
+      (h: any) => h._stepGate === true,
+    );
+    if (alreadyInjected) {
+      D("globalThis: already injected, skip");
+      return;
+    }
+
+    // Tag our handler for dedup
+    (handler as any)._stepGate = true;
+    existing.push(handler);
+    map.set(event, existing);
+    D(`globalThis: injected agent:bootstrap (total: ${existing.length})`);
+  };
+
+  // Inject immediately
+  inject();
+
+  // Re-inject after 5s (after hooks:loader has run)
+  setTimeout(() => {
+    D("globalThis: delayed re-inject (5s)");
+    inject();
+  }, 5000);
+
+  // Re-inject after 15s (safety net)
+  setTimeout(() => {
+    D("globalThis: delayed re-inject (15s)");
+    inject();
+  }, 15000);
 }
 
 // ── Plugin Entry Point ────────────────────────────────────────────────────
@@ -305,16 +352,25 @@ export default function register(api: any) {
   const minSteps = cfg.minSteps ?? 3;
   const syncInterval = cfg.syncInterval ?? 15000;
 
-  D(`=== step-gate v9 register() ===`);
+  D(`=== step-gate v10 register() ===`);
   if (!enabled) return;
 
   const wsDir = (): string =>
     process.env.OPENCLAW_WORKSPACE_DIR ||
     path.join(os.homedir(), ".openclaw", "workspace");
 
-  // ── Bootstrap hook: inject STEP-GATE.md into agent context ──
+  // ── Dedup flag to prevent double-fire ──
+  let lastBootstrapTs = 0;
 
   const bootstrapHandler = async (event: any) => {
+    // Dedup: ignore if fired within 2 seconds
+    const now = Date.now();
+    if (now - lastBootstrapTs < 2000) {
+      D("bootstrap: dedup skip");
+      return;
+    }
+    lastBootstrapTs = now;
+
     D("bootstrap FIRED");
     const ctx = event?.context ?? {};
     const wd = ctx.workspaceDir || wsDir();
@@ -352,12 +408,15 @@ export default function register(api: any) {
     }
   };
 
+  // Primary: api.registerHook
   api.registerHook("agent:bootstrap", bootstrapHandler, {
     name: "step-gate-bootstrap",
   });
 
-  // ── Timer: periodic checkbox sync ──
+  // Fallback: globalThis injection with delay
+  injectGlobalHook(bootstrapHandler);
 
+  // ── Timer: periodic checkbox sync ──
   setInterval(() => {
     try {
       syncAll(wsDir());
@@ -366,6 +425,6 @@ export default function register(api: any) {
     }
   }, syncInterval);
 
-  D("v9 loaded (completed-filter + dual-path scan)");
-  api.logger?.info?.("step-gate v9 loaded");
+  D("v10 loaded (globalThis-reinject + dedup + completed-filter)");
+  api.logger?.info?.("step-gate v10 loaded");
 }

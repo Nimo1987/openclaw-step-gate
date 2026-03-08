@@ -1,58 +1,31 @@
+/**
+ * Step Gate — Internal Hook Handler (v11)
+ *
+ * This is an Internal Hook handler loaded by OpenClaw's hooks:loader.
+ * It listens to `agent:bootstrap` events and injects STEP-GATE.md
+ * into the agent's bootstrap context.
+ *
+ * Separate from the Plugin (which handles periodic checkbox sync).
+ */
+
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-
-/**
- * Step Gate Plugin v11 — Periodic Checkbox Sync Only
- *
- * This plugin ONLY handles periodic checkbox synchronization:
- *   - Every 15s, scans todo files in workspace
- *   - Reads Execution Log status → auto-checks corresponding checkboxes
- *   - Marks todo file as Completed when all steps are done
- *   - Writes/removes STEP-GATE.md on disk for reference
- *
- * Bootstrap injection is handled by the Internal Hook (hook/handler.js),
- * which is the correct way to hook into agent:bootstrap events.
- *
- * v11 changes:
- *   - REMOVED: api.registerHook("agent:bootstrap") — wrong system, never fired
- *   - REMOVED: globalThis injection hack — unstable, wrong approach
- *   - KEPT: setInterval checkbox sync (this is what plugins are good at)
- */
 
 // ── Debug Logger ──────────────────────────────────────────────────────────
 
 const DEBUG_LOG = process.env.STEP_GATE_LOG || "/tmp/step-gate.log";
 
-function D(msg: string): void {
+function D(msg) {
   try {
-    fs.appendFileSync(DEBUG_LOG, `[${new Date().toISOString()}] [plugin] ${msg}\n`);
+    fs.appendFileSync(DEBUG_LOG, `[${new Date().toISOString()}] [hook] ${msg}\n`);
   } catch {}
-}
-
-// ── Types ─────────────────────────────────────────────────────────────────
-
-interface Step {
-  number: number;
-  title: string;
-  status: "done" | "pending" | "in-progress";
-}
-
-interface Todo {
-  path: string;
-  filename: string;
-  steps: Step[];
-  total: number;
-  done: number;
-  current: number | null;
-  skipped: number[];
-  fileCompleted: boolean;
 }
 
 // ── Parser ────────────────────────────────────────────────────────────────
 
-function parseSteps(content: string): Step[] {
-  const steps: Step[] = [];
+function parseSteps(content) {
+  const steps = [];
   const lines = content.split("\n");
 
   const cbRe =
@@ -65,7 +38,7 @@ function parseSteps(content: string): Step[] {
     const start = +cb[2];
     const end = cb[3] ? +cb[3] : start;
     const title = cb[4].trim();
-    const status: Step["status"] =
+    const status =
       mark === "x" || mark === "X"
         ? "done"
         : mark === "~"
@@ -104,7 +77,7 @@ function parseSteps(content: string): Step[] {
 
 // ── File-level completion check ───────────────────────────────────────────
 
-function isFileCompleted(content: string): boolean {
+function isFileCompleted(content) {
   const header = content.split("\n").slice(0, 10).join("\n").toLowerCase();
   return (
     header.includes("status: completed") ||
@@ -115,7 +88,7 @@ function isFileCompleted(content: string): boolean {
 
 // ── Analyze a single todo file ────────────────────────────────────────────
 
-function analyze(fp: string): Todo | null {
+function analyze(fp) {
   try {
     const content = fs.readFileSync(fp, "utf-8");
     const steps = parseSteps(content);
@@ -125,7 +98,7 @@ function analyze(fp: string): Todo | null {
     const sorted = [...steps].sort((a, b) => a.number - b.number);
     const fileCompleted = isFileCompleted(content);
 
-    let current: number | null = null;
+    let current = null;
     for (const s of sorted) {
       if (s.status !== "done") {
         current = s.number;
@@ -133,7 +106,7 @@ function analyze(fp: string): Todo | null {
       }
     }
 
-    const skipped: number[] = [];
+    const skipped = [];
     let lastDone = 0;
     for (const s of sorted) {
       if (s.status === "done") {
@@ -162,7 +135,7 @@ function analyze(fp: string): Todo | null {
 
 // ── Find todo files ───────────────────────────────────────────────────────
 
-function scanDir(dir: string, results: Todo[]): void {
+function scanDir(dir, results) {
   try {
     for (const f of fs.readdirSync(dir)) {
       if (!f.startsWith("todo") || !f.endsWith(".md")) continue;
@@ -179,8 +152,8 @@ function scanDir(dir: string, results: Todo[]): void {
   } catch {}
 }
 
-function findTodos(dir: string): Todo[] {
-  const results: Todo[] = [];
+function findTodos(dir) {
+  const results = [];
   scanDir(dir, results);
   scanDir(path.join(dir, "todos"), results);
 
@@ -193,63 +166,15 @@ function findTodos(dir: string): Todo[] {
   });
 }
 
-// ── Checkbox Sync ─────────────────────────────────────────────────────────
-
-function syncCheckboxes(fp: string, steps: Step[]): boolean {
-  try {
-    let content = fs.readFileSync(fp, "utf-8");
-    let changed = false;
-
-    for (const s of steps) {
-      if (s.status !== "done") continue;
-
-      const patterns = [
-        new RegExp(`(- \\[) (\\]\\s*${s.number}\\.\\s*)`, "m"),
-        new RegExp(`(- \\[) (\\]\\s*Step\\s*${s.number}[.:]\\s*)`, "mi"),
-        new RegExp(
-          `(- \\[) (\\]\\s*Step\\s*${s.number}\\s*[-–]\\s*\\d+[.:]\\s*)`,
-          "mi",
-        ),
-      ];
-
-      for (const p of patterns) {
-        if (p.test(content)) {
-          content = content.replace(p, "$1x$2");
-          changed = true;
-          D(`cb:${s.number}`);
-          break;
-        }
-      }
-    }
-
-    if (
-      steps.length &&
-      steps.every((s) => s.status === "done") &&
-      /# Status: In Progress/i.test(content)
-    ) {
-      content = content.replace(
-        /# Status: In Progress/i,
-        "# Status: Completed",
-      );
-      changed = true;
-    }
-
-    if (changed) fs.writeFileSync(fp, content, "utf-8");
-    return changed;
-  } catch {
-    return false;
-  }
-}
-
 // ── Generate STEP-GATE.md content ─────────────────────────────────────────
 
-function generateBootstrap(todos: Todo[], minSteps: number): string | null {
+function generateBootstrap(todos, minSteps) {
   const active = todos.filter(
     (t) => !t.fileCompleted && t.total >= minSteps && t.done < t.total,
   );
   if (!active.length) return null;
 
-  const lines: string[] = [
+  const lines = [
     "# STEP GATE — Task Execution Discipline",
     "",
     "## Rules",
@@ -281,49 +206,64 @@ function generateBootstrap(todos: Todo[], minSteps: number): string | null {
   return lines.join("\n");
 }
 
-// ── Periodic Sync ─────────────────────────────────────────────────────────
+// ── Bootstrap Handler ─────────────────────────────────────────────────────
 
-function syncAll(dir: string, minSteps: number): void {
-  const todos = findTodos(dir);
+const MIN_STEPS = 3;
 
-  for (const t of todos) syncCheckboxes(t.path, t.steps);
-
-  const content = generateBootstrap(todos, minSteps);
-  if (content) {
-    try {
-      fs.writeFileSync(path.join(dir, "STEP-GATE.md"), content, "utf-8");
-    } catch {}
-  } else {
-    try {
-      fs.unlinkSync(path.join(dir, "STEP-GATE.md"));
-    } catch {}
+const stepGateBootstrapHandler = async (event) => {
+  // Guard: only handle agent:bootstrap
+  if (event.type !== "agent" || event.action !== "bootstrap") {
+    return;
   }
-}
 
-// ── Plugin Entry Point ────────────────────────────────────────────────────
+  D("bootstrap FIRED");
 
-export default function register(api: any) {
-  const cfg = api.pluginConfig ?? {};
-  const enabled = cfg.enabled !== false;
-  const minSteps = cfg.minSteps ?? 3;
-  const syncInterval = cfg.syncInterval ?? 15000;
-
-  D(`=== step-gate v11 register() ===`);
-  if (!enabled) return;
-
-  const wsDir = (): string =>
+  const context = event.context ?? {};
+  const workspaceDir =
+    context.workspaceDir ||
     process.env.OPENCLAW_WORKSPACE_DIR ||
     path.join(os.homedir(), ".openclaw", "workspace");
 
-  // Periodic checkbox sync — the only job of this plugin
-  setInterval(() => {
-    try {
-      syncAll(wsDir(), minSteps);
-    } catch (e: any) {
-      D(`sync err: ${e.message}`);
-    }
-  }, syncInterval);
+  const todos = findTodos(workspaceDir);
+  const completedCount = todos.filter((t) => t.fileCompleted).length;
+  D(`found ${todos.length} todos (${completedCount} completed)`);
 
-  D("v11 loaded (checkbox-sync only, bootstrap via Internal Hook)");
-  api.logger?.info?.("step-gate v11 loaded");
-}
+  if (!todos.length) return;
+
+  const content = generateBootstrap(todos, MIN_STEPS);
+  if (!content) {
+    D("no active todos need injection, skip");
+    return;
+  }
+
+  // Write STEP-GATE.md to disk (for periodic sync reference)
+  const fp = path.join(workspaceDir, "STEP-GATE.md");
+  try {
+    fs.writeFileSync(fp, content, "utf-8");
+  } catch (e) {
+    D(`failed to write STEP-GATE.md: ${e.message}`);
+  }
+
+  // Inject into bootstrapFiles (in-memory context mutation)
+  const bf = context.bootstrapFiles;
+  if (Array.isArray(bf)) {
+    // Remove existing STEP-GATE.md entry if present
+    const idx = bf.findIndex(
+      (f) => f.name === "STEP-GATE.md" || f.path?.endsWith("STEP-GATE.md"),
+    );
+    if (idx >= 0) bf.splice(idx, 1);
+
+    // Prepend (highest priority)
+    bf.unshift({
+      name: "STEP-GATE.md",
+      path: fp,
+      content,
+      source: "step-gate",
+    });
+    D(`injected STEP-GATE.md into bootstrapFiles (${bf.length} total files)`);
+  } else {
+    D("WARNING: bootstrapFiles not found or not an array in event.context");
+  }
+};
+
+export default stepGateBootstrapHandler;

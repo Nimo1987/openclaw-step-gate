@@ -1,5 +1,8 @@
 node_modules/
-*.js
 *.d.ts
 *.map
 .DS_Store
+
+# Ignore compiled JS except the hook handler (which is pure JS, not compiled)
+*.js
+!hook/handler.js

@@ -20,110 +20,72 @@
 
 ## 解决方案
 
-Step Gate 做两件事：
+Step Gate v11 由两个组件协同工作：
 
-**1. 自动 Checkbox 同步**
+| 组件 | 部署位置 | 职责 |
+|---|---|---|
+| **Internal Hook** | `~/.openclaw/hooks/step-gate/` | 监听 `agent:bootstrap` 事件，将 STEP-GATE.md 注入 agent 上下文 |
+| **Plugin** | `~/.openclaw/extensions/step-gate/` | 每 15 秒扫描 todo 文件，自动同步 checkbox |
 
-每 15 秒扫描 workspace 中的 todo 文件。如果 Execution Log 里某步标记了 `Status: done`，但 checkbox 还是 `[ ]`，自动改成 `[x]`。
+### 为什么是两个组件？
 
-不依赖 Agent 的"自觉性"。
-
-**2. Bootstrap 注入**
-
-每次 Agent 启动新 session 时，将当前任务进度注入到 Agent 上下文中（通过 `STEP-GATE.md`）。内容包括：
-
-- 当前任务的所有步骤和完成状态
-- "不许跳步、不许合并"的执行纪律
-- 当前应该执行哪一步
-
-```
-⬜ Step 1: 搜索市场规模数据 ← NOW
-⬜ Step 2: 分析竞品
-⬜ Step 3: 生成报告
-
-→ Execute Step 1 now.
-```
+> OpenClaw 有两套独立的 Hook 系统：**Plugin Hook System**（`api.registerHook()`）和 **Internal Hook System**（`HOOK.md` + `handler.js`）。`agent:bootstrap` 是 Internal Hook 的事件，Plugin 的 `api.registerHook()` 注册的 handler 永远不会被 Internal Hook System 调用。
+>
+> v1-v10 一直试图用 Plugin 的 `api.registerHook("agent:bootstrap")` + globalThis hack 来注入 bootstrap，**从未成功**。v11 把 bootstrap 注入正确地放到了 Internal Hook 系统。
 
 ## 安装
 
-SSH 到 OpenClaw 服务器：
+```bash
+# 一键安装
+curl -sL https://raw.githubusercontent.com/Nimo1987/openclaw-step-gate/main/install.sh | sudo bash
+```
+
+或手动：
 
 ```bash
-# 下载
 git clone https://github.com/Nimo1987/openclaw-step-gate.git
 cd openclaw-step-gate
-
-# 一键安装（包含 plugin + 精简版 AGENTS.md）
 sudo bash install.sh
 ```
 
-或者手动安装：
+安装脚本会：
+1. 创建 `~/.openclaw/hooks/step-gate/`（HOOK.md + handler.js）
+2. 创建 `~/.openclaw/extensions/step-gate/`（plugin manifest + index.ts）
+3. 更新 `openclaw.json`（启用 plugin + hook）
+4. 重启 Gateway
 
-```bash
-# 1. 复制 plugin 文件
-mkdir -p ~/.openclaw/extensions/step-gate
-cp index.ts openclaw.plugin.json ~/.openclaw/extensions/step-gate/
+## 工作原理
 
-# 2. 编辑 ~/.openclaw/openclaw.json，添加：
-# plugins.entries.step-gate: { "enabled": true, "config": { "enabled": true, "minSteps": 3 } }
-# plugins.installs.step-gate: { "source": "path", "installPath": "~/.openclaw/extensions/step-gate" }
-# plugins.load.paths: ["~/.openclaw/extensions/step-gate"]
-# hooks.internal.enabled: true
-
-# 3. 重启
-openclaw gateway restart
+```
+Agent 启动 session
+    ↓
+agent:bootstrap 事件触发
+    ↓
+Internal Hook 扫描 todo*.md → 生成 STEP-GATE.md → 注入 bootstrapFiles
+    ↓
+Agent 看到步骤纪律 + 当前进度
+    ↓
+Agent 执行步骤 → 更新 Execution Log (Status: done)
+    ↓
+Plugin 15s 定时器检测到 → 自动改 checkbox [ ] → [x]
+    ↓
+下次 session 启动时注入最新进度
 ```
 
 ## 验证
 
 ```bash
+# 实时日志
 tail -f /tmp/step-gate.log
+
+# 发一条消息触发 /new，应该看到：
+# [hook] bootstrap FIRED
+# [hook] found X todos (Y completed)
+# [hook] injected STEP-GATE.md (Z total bootstrap files)
+
+# 检查生成的文件
+cat ~/.openclaw/workspace/STEP-GATE.md
 ```
-
-正常输出：
-```
-[2026-03-08T08:12:09Z] === step-gate register() ===
-[2026-03-08T08:12:09Z] loaded
-[2026-03-08T08:12:09Z] bootstrap FIRED
-[2026-03-08T08:12:09Z] bootstrap: 1 todos
-[2026-03-08T08:12:09Z] injected STEP-GATE.md (9 files)
-[2026-03-08T08:12:24Z] cb:1
-[2026-03-08T08:12:39Z] cb:2
-```
-
-## 工作原理
-
-```
-Agent 创建 todo → 执行步骤 → 更新 Execution Log (Status: done)
-                                        ↓
-                              Plugin 15s 定时器检测到
-                                        ↓
-                              自动改 checkbox [ ] → [x]
-                              自动更新 STEP-GATE.md
-                                        ↓
-                              下次 bootstrap 注入最新进度
-```
-
-### 为什么不用 Hook 实时同步？
-
-试过了。OpenClaw 的 hook 系统有以下限制：
-
-- `agent:bootstrap` 只在 session 开始时触发一次
-- 没有 `after_tool_call` 级别的 hook
-- `tool_result_persist` 是同步的，只能修改 tool result，无法阻断执行流
-- Plugin 的 `register()` 在 hooks loader 之前执行，导致 handler map 可能被重置
-
-最终方案：**定时器轮询 + globalThis fallback**。不优雅，但稳定。
-
-### 为什么附带 AGENTS.md？
-
-OpenClaw 的默认 AGENTS.md 模板需要用户自己填充。大多数用户会写很长的执行规则（我们的原版是 357 行 / 17KB），其中大量内容与 Step Gate 功能重复。
-
-精简版 AGENTS.md（134 行 / 4KB）：
-- 删除了被 plugin 替代的内容（checkbox 强制读写规则、Todo Guard 工具、ASCII 流程图）
-- 保留了核心执行逻辑（Mode A/B、三阶段协议、敏感操作白名单）
-- 补充了官方模板要求的必要章节（Session Startup、Safety Red Lines）
-- **节省约 75% 的上下文 token**
 
 ## 配置
 
@@ -131,13 +93,11 @@ OpenClaw 的默认 AGENTS.md 模板需要用户自己填充。大多数用户会
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `enabled` | boolean | `true` | 启用/禁用 |
+| `enabled` | boolean | `true` | 启用/禁用 checkbox 同步 |
 | `minSteps` | number | `3` | 最少多少步才触发 |
 | `syncInterval` | number | `15000` | 同步间隔（毫秒） |
 
 ## Todo 文件格式
-
-Step Gate 识别以下格式的 todo 文件：
 
 ```markdown
 # Task: 某个任务
@@ -153,10 +113,6 @@ Step Gate 识别以下格式的 todo 文件：
 ### Step 1: 第一步
 - Status: done
 - Result: 完成了
-
-### Step 2: 第二步
-- Status: done
-- Result: 也完成了
 ```
 
 文件名必须以 `todo` 开头、`.md` 结尾，且在最近 24 小时内修改过。
@@ -164,16 +120,18 @@ Step Gate 识别以下格式的 todo 文件：
 ## 卸载
 
 ```bash
-rm -rf ~/.openclaw/extensions/step-gate/
+rm -rf ~/.openclaw/hooks/step-gate
+rm -rf ~/.openclaw/extensions/step-gate
 # 从 openclaw.json 中移除 step-gate 相关配置
-openclaw gateway restart
 ```
 
-## 兼容性
+## 版本历史
 
-- OpenClaw v1.x+
-- 任意 LLM 模型（不依赖特定模型的指令遵从能力）
-- 需要 `hooks.internal.enabled: true`（安装脚本自动配置）
+| 版本 | 变化 |
+|---|---|
+| v1-v4 | 探索阶段：错误的 hook event 名、plugin 未注册 |
+| v5-v10 | Plugin-only 方案。用 `api.registerHook("agent:bootstrap")` + globalThis hack。**从未生效** — 用错了 hook 系统 |
+| **v11** | 拆分为 Internal Hook + Plugin。Bootstrap 注入终于用对了系统。 |
 
 ## License
 
